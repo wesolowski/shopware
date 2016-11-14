@@ -24,6 +24,8 @@
 
 namespace Shopware\Components\Model;
 
+use Doctrine\DBAL\Connection;
+
 /**
  * CategoryDenormalization-Class
  *
@@ -53,30 +55,21 @@ class CategoryDenormalization
     protected $enableTransactions = true;
 
     /**
-     * @param \PDO $connection
+     * @param Connection $connection
      */
-    public function __construct(\PDO $connection)
+    public function __construct(Connection $connection)
     {
         $this->connection = $connection;
     }
 
     /**
-     * @param  \PDO $connection
+     * @param  Connection $connection
      * @return CategoryDenormalization
      */
     public function setConnection($connection)
     {
         $this->connection = $connection;
-
         return $this;
-    }
-
-    /**
-     * @return \PDO
-     */
-    public function getConnection()
-    {
-        return $this->connection;
     }
 
     /**
@@ -87,17 +80,11 @@ class CategoryDenormalization
         return $this->enableTransactions;
     }
 
-    /**
-     * @return CategoryDenormalization
-     */
     public function enableTransactions()
     {
         $this->enableTransactions = true;
     }
 
-    /**
-     * @return CategoryDenormalization
-     */
     public function disableTransactions()
     {
         $this->enableTransactions = false;
@@ -124,7 +111,7 @@ class CategoryDenormalization
      */
     public function getParentCategoryIds($id)
     {
-        $stmt = $this->getConnection()->prepare('SELECT id, parent FROM s_categories WHERE id = :id AND parent IS NOT NULL');
+        $stmt = $this->connection->prepare('SELECT id, parent FROM s_categories WHERE id = :id AND parent IS NOT NULL');
         $stmt->execute(array(':id' => $id));
         $parent = $stmt->fetch(\PDO::FETCH_ASSOC);
         if (!$parent) {
@@ -137,8 +124,6 @@ class CategoryDenormalization
         if ($parent) {
             $result = array_merge($result, $parent);
         }
-
-        $cache[$id] = $result;
 
         return $result;
     }
@@ -153,27 +138,27 @@ class CategoryDenormalization
     {
         if ($categoryId === null) {
             $sql = '
-                SELECT count(id)
+                SELECT COUNT(id)
                 FROM s_categories
                 WHERE parent IS NOT NULL
             ';
 
-            $stmt = $this->getConnection()->prepare($sql);
+            $stmt = $this->connection->prepare($sql);
             $stmt->execute();
         } else {
             $sql = '
-                SELECT count(c.id)
+                SELECT COUNT(c.id)
                 FROM  s_categories c
                 WHERE c.path LIKE :categoryId
             ';
 
-            $stmt = $this->getConnection()->prepare($sql);
+            $stmt = $this->connection->prepare($sql);
             $stmt->execute(array('categoryId' => '%|' . $categoryId . '|%'));
         }
 
         $count = $stmt->fetchColumn();
 
-        return (int) $count;
+        return (int)$count;
     }
 
     /**
@@ -209,7 +194,7 @@ class CategoryDenormalization
             $sql = $this->limit($sql, $count, $offset);
         }
 
-        $stmt = $this->getConnection()->prepare($sql);
+        $stmt = $this->connection->prepare($sql);
         $stmt->execute($parameters);
 
         $count = 0;
@@ -234,7 +219,7 @@ class CategoryDenormalization
      */
     public function rebuildPath($categoryId, $categoryPath = null)
     {
-        $updateStmt = $this->connection->prepare('UPDATE s_categories set path = :path WHERE id = :categoryId');
+        $updateStmt = $this->connection->prepare('UPDATE s_categories SET path = :path WHERE id = :categoryId');
 
         $parents = $this->getParentCategoryIds($categoryId);
         array_shift($parents);
@@ -243,7 +228,7 @@ class CategoryDenormalization
             $path = null;
         } else {
             $path = implode('|', $parents);
-            $path = '|'.$path.'|';
+            $path = '|' . $path . '|';
         }
 
         if ($categoryPath != $path) {
@@ -262,25 +247,7 @@ class CategoryDenormalization
      */
     public function removeOldAssignmentsCount($categoryId)
     {
-        $sql = '
-            SELECT parentCategoryId
-            FROM s_articles_categories_ro
-            WHERE categoryID = :categoryId
-            AND parentCategoryId <> categoryID
-            GROUP BY parentCategoryId
-        ';
-
-        $stmt = $this->getConnection()->prepare($sql);
-        $stmt->execute(array('categoryId' => $categoryId));
-
-        $rows = $stmt->fetchAll(\PDO::FETCH_COLUMN);
-
-        // in case that a leaf category is moved
-        if (empty($rows)) {
-            return 1;
-        }
-
-        return count($rows);
+        return 1;
     }
 
     /**
@@ -294,38 +261,53 @@ class CategoryDenormalization
      */
     public function removeOldAssignments($categoryId, $count = null, $offset = 0)
     {
+        $categoryIds = $this->getChildCategories($categoryId);
+
         $sql = '
-            SELECT parentCategoryId
+            DELETE
             FROM s_articles_categories_ro
-            WHERE categoryID = :categoryId
-            AND parentCategoryId <> categoryID
-            GROUP BY parentCategoryId
-       ';
+            WHERE parentCategoryId IN (:categoryIds)
+        ';
 
-        if ($count !== null) {
-            $sql = $this->limit($sql, $count, $offset);
-        }
+        $stmt = $this->connection->executeQuery(
+            $sql,
+            [':categoryIds' => (array)$categoryIds],
+            [':categoryIds' => Connection::PARAM_INT_ARRAY]
+        );
 
-        $stmt = $this->getConnection()->prepare($sql);
-        $stmt->execute(array('categoryId' => $categoryId));
+        $count = $stmt->rowCount();
 
-        $deleteStmt = $this->getConnection()->prepare('DELETE FROM s_articles_categories_ro WHERE parentCategoryID = :categoryId AND parentCategoryId <> categoryID');
+        $sql = '
+            SELECT parent FROM s_categories WHERE id = :categoryId
+        ';
 
-        $count = 0;
+        $parentId = $this->connection->fetchColumn(
+            $sql,
+            [':categoryId' => $categoryId]
+        );
 
-        $parentCategoryId = $stmt->fetchColumn();
+        $categoryIds = array_diff($this->getChildCategories($parentId), $categoryIds);
 
-        if ($parentCategoryId) {
-            do {
-                $deleteStmt->execute(array('categoryId' => $parentCategoryId));
-                $count += $deleteStmt->rowCount();
-            } while ($parentCategoryId = $stmt->fetchColumn());
-        } else {
-            $deleteStmt->execute(array('categoryId' => $categoryId));
-            $count += $deleteStmt->rowCount();
-        }
+        $count -= $this->fixAssignment($categoryIds);
 
         return $count;
+    }
+
+    private function getChildCategories($categoryIds)
+    {
+        $sql = '
+            SELECT c2.id
+            FROM s_categories c, s_categories c2
+            WHERE (c2.path LIKE ' . $this->concat($this->quote('%|'), 'c.id', $this->quote('|%')) . ' OR c2.id = c.id)
+            AND c.id IN (?)
+        ';
+
+        $statement = $this->connection->executeQuery($sql,
+            array((array)$categoryIds),
+            array(Connection::PARAM_INT_ARRAY)
+        );
+
+        return $statement->fetchAll(\PDO::FETCH_COLUMN);
     }
 
     /**
@@ -337,24 +319,17 @@ class CategoryDenormalization
     public function rebuildAssignmentsCount($categoryId)
     {
         $sql = '
-            SELECT c.id
+            SELECT COUNT(c.id)
             FROM  s_categories c
             INNER JOIN s_articles_categories ac ON ac.categoryID = c.id
-            WHERE c.path LIKE :categoryId
+            WHERE c.path LIKE ' . $this->concat($this->quote('%|'), ':categoryId', $this->quote('|%')) . ' OR c.id = :categoryId
             GROUP BY c.id
         ';
 
-        $stmt = $this->getConnection()->prepare($sql);
-        $stmt->execute(array('categoryId' => '%|' . $categoryId . '|%'));
+        $stmt = $this->connection->prepare($sql);
+        $stmt->execute(array('categoryId' => $categoryId));
 
-        $rows = $stmt->fetchAll(\PDO::FETCH_COLUMN);
-
-        // in case that a leaf category is moved
-        if (empty($rows)) {
-            return 1;
-        }
-
-        return count($rows);
+        return $stmt->fetchColumn();
     }
 
     /**
@@ -378,35 +353,32 @@ class CategoryDenormalization
             $affectedCategoriesSql = $this->limit($affectedCategoriesSql, $count, $offset);
         }
 
-        $stmt = $this->getConnection()->prepare($affectedCategoriesSql);
+        $stmt = $this->connection->prepare($affectedCategoriesSql);
         $stmt->execute(array('categoryId' => '%|' . $categoryId . '|%'));
 
-        $affectedCategories = array();
+        $affectedCategories = array(
+            $categoryId
+        );
         while ($row = $stmt->fetchColumn()) {
             $affectedCategories[] = $row;
         }
 
-        // in case that a leaf category is moved
-        if (count($affectedCategories) === 0) {
-            $affectedCategories = array($categoryId);
-        }
-
         $assignmentsSql = 'SELECT articleID, categoryID FROM `s_articles_categories` WHERE categoryID = :categoryId';
-        $assignmentsStmt = $this->getConnection()->prepare($assignmentsSql);
+        $assignmentsStmt = $this->connection->prepare($assignmentsSql);
 
-        $count = 0;
+        $result = 0;
 
         $this->beginTransaction();
         foreach ($affectedCategories as $categoryId) {
             $assignmentsStmt->execute(array('categoryId' => $categoryId));
 
             while ($assignment = $assignmentsStmt->fetch()) {
-                $count += $this->insertAssignment($assignment['articleID'], $assignment['categoryID']);
+                $result += $this->addAssignment($assignment['articleID'], $assignment['categoryID']);
             }
         }
         $this->commit();
 
-        return $count;
+        return $result;
     }
 
     /**
@@ -417,121 +389,103 @@ class CategoryDenormalization
     public function rebuildAllAssignmentsCount()
     {
         $sql = '
-            SELECT COUNT(*)
-            FROM  s_articles_categories ac
-            JOIN s_categories c
-            ON ac.categoryID = c.id
+            SELECT COUNT(*) FROM s_articles_categories
         ';
-
-        $stmt = $this->getConnection()->query($sql);
-        $rows = $stmt->fetchColumn();
-        return (int)$rows;
+        $stmt = $this->connection->query($sql);
+        return (int)$stmt->fetchColumn();
     }
 
     /**
-     * @param  int $count  maximum number of assignments to denormalize
+     * @param  int $count maximum number of assignments to denormalize
      * @param  int $offset
      * @return int number of new denormalized assignments
      */
     public function rebuildAllAssignments($count = null, $offset = 0)
     {
-        $allAssignsSql = "
-            SELECT ac.id, ac.articleID, ac.categoryID, c.parent
-            FROM s_articles_categories ac
-            INNER JOIN s_categories c ON ac.categoryID = c.id
-            LEFT JOIN s_categories c2 ON c.id = c2.parent
-            WHERE c2.id IS NULL
-            GROUP BY ac.id
-            ORDER BY articleID, categoryID
-        ";
+        $sql = '
+            INSERT INTO s_articles_categories_ro (articleID, categoryID, parentCategoryID)
 
-        if ($count !== null) {
-            $allAssignsSql = $this->limit($allAssignsSql, $count, $offset);
-        }
-
-        $assignments = $this->getConnection()->query($allAssignsSql);
-
-        $newRows = 0;
-        $this->beginTransaction();
-        while ($assignment = $assignments->fetch()) {
-            $newRows += $this->insertAssignment($assignment['articleID'], $assignment['categoryID']);
-        }
-        $this->commit();
-
-        return $newRows;
-    }
-
-    /**
-     * Inserts missing assignments in s_articles_categories_ro
-     *
-     * @param  int $articleId
-     * @param  int $categoryId
-     * @return int
-     */
-    private function insertAssignment($articleId, $categoryId)
-    {
-        $count = 0;
-
-        $parents = $this->getParentCategoryIds($categoryId);
-        if (empty($parents)) {
-            return $count;
-        }
-
-        $selectSql  = '
-            SELECT id
-            FROM s_articles_categories_ro
-            WHERE categoryID       = :categoryId
-            AND   articleID        = :articleId
-            AND   parentCategoryId = :parentCategoryId
+            SELECT ac.articleID, c2.id AS categoryID, c.id AS parentCategoryID
+            FROM (' . $this->limit('SELECT articleID, categoryID FROM s_articles_categories', $count, $offset) . ') ac
+            JOIN s_categories c
+            ON ac.categoryID = c.id
+            JOIN s_categories c2
+            ON (c.path LIKE ' . $this->concat($this->quote('%|'), 'c2.id', $this->quote('|%')) . ' OR c2.id = c.id)
+            LEFT JOIN s_articles_categories_ro ro
+            ON ro.categoryID = c2.id AND ro.articleID = ac.articleID
+            WHERE ro.id IS NULL
+            ORDER BY ac.articleID, c2.id, c.id;
         ';
 
-        $selectStmt = $this->getConnection()->prepare($selectSql);
-
-        $insertSql = 'INSERT INTO s_articles_categories_ro (articleID, categoryID, parentCategoryID) VALUES (:articleId, :categoryId, :parentCategoryId)';
-        $insertStmt = $this->getConnection()->prepare($insertSql);
-
-        foreach ($parents as $parentId) {
-            $selectStmt->execute(array(
-                ':articleId'        => $articleId,
-                ':categoryId'       => $parentId,
-                ':parentCategoryId' => $categoryId
-            ));
-
-            if ($selectStmt->fetchColumn() === false) {
-                $count++;
-
-                $insertStmt->execute(array(
-                    ':articleId'        => $articleId,
-                    ':categoryId'       => $parentId,
-                    ':parentCategoryId' => $categoryId
-                ));
-            }
-        }
-
-        return $count;
+        return $this->connection->exec($sql);
     }
 
     /**
      * Removes assignments in s_articles_categories_ro
      *
      * @param  int $articleId
-     * @param  int $categoryId
+     * @param  int|array $categoryIds
      * @return int
      */
-    public function removeAssignment($articleId, $categoryId)
+    public function removeAssignment($articleId, $categoryIds)
     {
-        $deleteQuery = '
+        $sql = '
             DELETE FROM s_articles_categories_ro
-            WHERE parentCategoryID = :categoryId
-            AND articleId = :articleId
+            WHERE parentCategoryID IN (:categoryIds)
+            AND articleID = :articleId
         ';
+        $stmt = $this->connection->executeQuery(
+            $sql,
+            [
+                ':articleId' => $articleId,
+                ':categoryIds' => (array)$categoryIds
+            ],
+            [
+                ':articleId' => \PDO::PARAM_INT,
+                ':categoryIds' => Connection::PARAM_INT_ARRAY
+            ]
+        );
 
-        $stmt = $this->getConnection()->prepare($deleteQuery);
-        $stmt->execute(array(
-            'categoryId' => $categoryId,
-            'articleId' => $articleId
-        ));
+        $count = $stmt->rowCount();
 
+        $count -= $this->fixAssignment($categoryIds, $articleId);
+
+        return $count;
+    }
+
+    private function fixAssignment($categoryIds, $articleId = null)
+    {
+        if ($articleId == null) {
+            $sql = ':articleId IS NULL AND ac.categoryID IN (:categoryIds)';
+        } else {
+            $sql = 'ac.articleID = :articleId AND ac.categoryID NOT IN (:categoryIds)';
+        }
+        $sql = '
+            INSERT INTO s_articles_categories_ro (articleID, categoryID, parentCategoryID)
+
+            SELECT ac.articleID, c2.id AS categoryID, c.id AS parentCategoryID
+            FROM s_articles_categories ac
+            JOIN s_categories c
+            ON ac.categoryID = c.id
+            JOIN s_categories c2
+            ON (c.path LIKE ' . $this->concat($this->quote('%|'), 'c2.id', $this->quote('|%')) . ' OR c2.id = c.id)
+            LEFT JOIN s_articles_categories_ro ro
+            ON ro.categoryID = c2.id AND ro.articleID = ac.articleID
+            WHERE ' . $sql . '
+            AND ro.id IS NULL
+            ORDER BY c2.id, c.id;
+        ';
+        $stmt = $this->connection->executeQuery(
+            $sql,
+            [
+                ':articleId' => $articleId,
+                ':categoryIds' => (array)$categoryIds
+            ],
+            [
+                ':articleId' => \PDO::PARAM_INT,
+                ':categoryIds' => Connection::PARAM_INT_ARRAY
+            ]
+        );
         return $stmt->rowCount();
     }
 
@@ -539,19 +493,42 @@ class CategoryDenormalization
      * Adds new assignment between $articleId and $categoryId
      *
      * @param int $articleId
-     * @param int $categoryId
+     * @param int|array $categoryIds
+     * @return int
      */
-    public function addAssignment($articleId, $categoryId)
+    public function addAssignment($articleId, $categoryIds)
     {
-        $this->beginTransaction();
-        $this->insertAssignment($articleId, $categoryId);
-        $this->commit();
+        $sql = '
+            INSERT INTO s_articles_categories_ro (articleID, categoryID, parentCategoryID)
+
+            SELECT :articleId, c2.id AS categoryID, c.id AS parentCategoryID
+            FROM s_categories c, s_categories c2
+            LEFT JOIN s_articles_categories_ro ro
+            ON ro.categoryID = c2.id AND ro.articleID = :articleId
+            WHERE c.id IN (:categoryIds)
+            AND (c.path LIKE ' . $this->concat($this->quote('%|'), 'c2.id', $this->quote('|%')) . ' OR c2.id = c.id)
+            AND ro.id IS NULL
+            ORDER BY c2.id, c.id;
+        ';
+        $stmt = $this->connection->executeQuery(
+            $sql,
+            [
+                ':articleId' => $articleId,
+                ':categoryIds' => (array)$categoryIds
+            ],
+            [
+                ':articleId' => \PDO::PARAM_INT,
+                ':categoryIds' => Connection::PARAM_INT_ARRAY
+            ]
+        );
+
+        return $stmt->rowCount();
     }
 
     /**
      * Removes all connections for given $articleId
      *
-     * @param  int $articleId
+     * @param int $articleId
      * @return int count of deleted rows
      */
     public function removeArticleAssignmentments($articleId)
@@ -562,7 +539,7 @@ class CategoryDenormalization
             WHERE articleID = :articleId
         ';
 
-        $stmt = $this->getConnection()->prepare($deleteQuery);
+        $stmt = $this->connection->prepare($deleteQuery);
         $stmt->execute(array('articleId' => $articleId));
 
         return $stmt->rowCount();
@@ -576,19 +553,7 @@ class CategoryDenormalization
      */
     public function removeCategoryAssignmentments($categoryId)
     {
-        $deleteQuery = '
-            DELETE ac1
-            FROM s_articles_categories_ro ac0
-            INNER JOIN s_articles_categories_ro ac1
-                ON ac0.parentCategoryID = ac1.parentCategoryID
-                AND ac0.id != ac1.id
-            WHERE ac0.categoryID = :categoryId
-        ';
-
-        $stmt = $this->getConnection()->prepare($deleteQuery);
-        $stmt->execute(array('categoryId' => $categoryId));
-
-        return $stmt->rowCount();
+        return $this->removeOldAssignments($categoryId);
     }
 
     /**
@@ -601,9 +566,9 @@ class CategoryDenormalization
     {
         // TRUNCATE is faster than DELETE
         try {
-            $count = $this->getConnection()->exec('TRUNCATE s_articles_categories_ro');
-        } catch (\PDOException $e) {
-            $count = $this->getConnection()->exec('DELETE FROM s_articles_categories_ro');
+            $count = $this->connection->exec('TRUNCATE s_articles_categories_ro');
+        } catch (\Doctrine\DBAL\DBALException $e) {
+            $count = $this->connection->exec('DELETE FROM s_articles_categories_ro');
         }
 
         return $count;
@@ -617,16 +582,20 @@ class CategoryDenormalization
     public function removeOrphanedAssignments()
     {
         $deleteOrphanedSql = '
-            DELETE ac.*
+            DELETE ac
+            FROM s_articles_categories ac
+            LEFT JOIN s_articles a ON ac.articleID = a.id
+            WHERE a.id IS NULL
+        ';
+        $count = $this->connection->exec($deleteOrphanedSql);
+
+        $deleteOrphanedSql = '
+            DELETE ac
             FROM s_articles_categories ac
             LEFT JOIN s_categories c ON ac.categoryID = c.id
-            LEFT JOIN s_articles a ON ac.articleID = a.id
-            WHERE
-            c.id IS NULL
-            OR a.id IS NULL
+            WHERE c.id IS NULL
         ';
-
-        $count = $this->getConnection()->exec($deleteOrphanedSql);
+        $count += $this->connection->exec($deleteOrphanedSql);
 
         return $count;
     }
@@ -634,30 +603,37 @@ class CategoryDenormalization
     /**
      * Adds an adapter-specific LIMIT clause to the SELECT statement.
      *
-     * @param  string     $sql
-     * @param  integer    $count
-     * @param  integer    $offset OPTIONAL
+     * @param  string $sql
+     * @param  integer $count
+     * @param  integer $offset OPTIONAL
      * @throws \Exception
      * @return string
      */
-    public function limit($sql, $count, $offset = 0)
+    private function limit($sql, $count, $offset = 0)
     {
-        $count = intval($count);
-        if ($count <= 0) {
-            throw new \Exception("LIMIT argument count=$count is not valid");
-        }
+        return $this->connection->getDatabasePlatform()->modifyLimitQuery($sql, $count, $offset);
+    }
 
-        $offset = intval($offset);
-        if ($offset < 0) {
-            throw new \Exception("LIMIT argument offset=$offset is not valid");
-        }
+    /**
+     * Returns an adapter-specific CONCAT clause.
+     *
+     * @param $parts
+     * @return string
+     */
+    private function concat(...$parts)
+    {
+        return $this->connection->getDatabasePlatform()->getConcatExpression(...$parts);
+    }
 
-        $sql .= " LIMIT $count";
-        if ($offset > 0) {
-            $sql .= " OFFSET $offset";
-        }
-
-        return $sql;
+    /**
+     * Quotes a given input parameter.
+     *
+     * @param mixed $input
+     * @return string|null
+     */
+    private function quote($input)
+    {
+        return $this->connection->quote($input);
     }
 
     /**
@@ -666,7 +642,7 @@ class CategoryDenormalization
     public function beginTransaction()
     {
         if ($this->transactionsEnabled()) {
-            $this->getConnection()->beginTransaction();
+            $this->connection->beginTransaction();
         }
     }
 
@@ -676,7 +652,7 @@ class CategoryDenormalization
     public function commit()
     {
         if ($this->transactionsEnabled()) {
-            $this->getConnection()->commit();
+            $this->connection->commit();
         }
     }
 }

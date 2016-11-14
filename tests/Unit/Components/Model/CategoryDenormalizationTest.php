@@ -70,15 +70,19 @@ class CategoryDenormalizationTest extends \PHPUnit_Extensions_Database_TestCase
             $this->markTestSkipped(
                 'Could not create sqlite connection, got error:  ' . $e->getMessage()
             );
+            return;
         }
 
         $schemaSql = file_get_contents(__DIR__ . '/_CategoryDenormalization/schema.sql');
         $conn->exec($schemaSql);
 
         $this->conn = $conn;
-        $this->component = new CategoryDenormalization($conn);
+        $dbal = \Doctrine\DBAL\DriverManager::getConnection(['pdo' => $conn]);
+        $this->component = new CategoryDenormalization($dbal);
 
         parent::setUp();
+
+        $this->component->rebuildCategoryPath();
     }
 
     /**
@@ -111,19 +115,6 @@ class CategoryDenormalizationTest extends \PHPUnit_Extensions_Database_TestCase
         $dataset->addFullReplacement('##NULL##', null);
 
         return $dataset;
-    }
-
-    /**
-     * @covers \Shopware\Components\Model\CategoryDenormalization::setConnection
-     * @covers \Shopware\Components\Model\CategoryDenormalization::getConnection
-     */
-    public function testSetConnection()
-    {
-        $pdo = $this->createMock(PDOMock::class);
-
-        $this->component->setConnection($pdo);
-
-        $this->assertSame($pdo, $this->component->getConnection());
     }
 
     /**
@@ -181,22 +172,24 @@ class CategoryDenormalizationTest extends \PHPUnit_Extensions_Database_TestCase
 
         // Assign to Getränke
         $this->conn->exec('INSERT INTO s_articles_categories (articleID, categoryID) VALUES (1, 5)');
-        $this->component->addAssignment(1, 5);
+        $this->assertEquals(3, $this->component->addAssignment(1, 5));
 
         // Assign to Spirits
         $this->conn->exec('INSERT INTO s_articles_categories (articleID, categoryID) VALUES (1, 7)');
-        $this->component->addAssignment(1, 7);
+        $this->assertEquals(3, $this->component->addAssignment(1, 7));
 
         $this->assertEquals(6, $this->getConnection()->getRowCount('s_articles_categories_ro'));
 
         $this->conn->exec('DELETE FROM s_articles_categories WHERE articleID = 1 AND categoryID = 5');
-        $this->component->removeAssignment(1, 5);
+        $this->assertEquals(3, $this->component->removeAssignment(1, 5));
 
         $this->assertEquals(3, $this->getConnection()->getRowCount('s_articles_categories_ro'));
     }
 
     public function testRebuildCategoryPath()
     {
+        $this->conn->exec('UPDATE s_categories SET path = NULL');
+
         $result = $this->component->rebuildCategoryPathCount();
 
         // We have 6 row in our testdataset
@@ -245,15 +238,15 @@ class CategoryDenormalizationTest extends \PHPUnit_Extensions_Database_TestCase
         $this->assertEquals(1, $result, 'One Parent-Category has to be cleanen up');
 
         $affectedRows = $this->component->removeOldAssignments(4);
-        $this->assertEquals(2, $affectedRows, 'Two old assignment should be removed');
+        $this->assertEquals(3, $affectedRows, 'Three old assignment should be removed');
 
         $result = $this->component->rebuildAssignmentsCount(4);
         $this->assertEquals(1, $result, 'Affected Categories');
 
         $affectedRows = $this->component->rebuildAssignments(4);
-        $this->assertEquals(3, $affectedRows, '3 new assignments should be created');
+        $this->assertEquals(2, $affectedRows, '3 new assignments should be created');
 
-        $this->assertEquals(7, $this->getConnection()->getRowCount('s_articles_categories_ro'));
+        $this->assertEquals(5, $this->getConnection()->getRowCount('s_articles_categories_ro'));
     }
 
     /**
@@ -280,15 +273,15 @@ class CategoryDenormalizationTest extends \PHPUnit_Extensions_Database_TestCase
         $this->assertEquals(1, $result, 'One category tree is affected');
 
         $affectedRows = $this->component->removeOldAssignments(5);
-        $this->assertEquals(2, $affectedRows, 'Two old assignment should be removed');
+        $this->assertEquals(3, $affectedRows, 'Three old assignment should be removed');
 
         $affectedRows = $this->component->rebuildAssignments(5);
-        $this->assertEquals(2, $affectedRows, 'Two new assignments should be created');
+        $this->assertEquals(1, $affectedRows, 'Three new assignments should be created');
 
         $rows = $this->conn->query('SELECT count(id) FROM s_articles_categories_ro WHERE parentCategoryID = 5')->fetchColumn();
-        $this->assertEquals(3, $rows, '3 Rows should be in database');
+        $this->assertEquals(1, $rows, '3 Rows should be in database');
 
-        $this->assertEquals(6, $this->getConnection()->getRowCount('s_articles_categories_ro'));
+        $this->assertEquals(4, $this->getConnection()->getRowCount('s_articles_categories_ro'));
     }
 
     public function testRemoveAllAssignments()
@@ -343,55 +336,6 @@ class CategoryDenormalizationTest extends \PHPUnit_Extensions_Database_TestCase
         $result = $this->component->rebuildAllAssignmentsCount();
 
         $this->assertEquals(0, $result);
-    }
-
-    public function testLimitWithLimitArgument()
-    {
-        $statement = 'SELECT * FROM example';
-
-        $expected = 'SELECT * FROM example LIMIT 10';
-        $result = $this->component->limit($statement, 10);
-
-        $this->assertEquals($expected, $result);
-    }
-
-
-    public function testLimitWithLimitArgumentAndOffsetNull()
-    {
-        $statement = 'SELECT * FROM example';
-
-        $expected = 'SELECT * FROM example LIMIT 10';
-        $result = $this->component->limit($statement, 10, null);
-
-        $this->assertEquals($expected, $result);
-    }
-
-    public function testLimitWithLimitArgumentAndOffset()
-    {
-        $statement = 'SELECT * FROM example';
-
-        $expected = 'SELECT * FROM example LIMIT 10 OFFSET 20';
-        $result = $this->component->limit($statement, 10, 20);
-
-        $this->assertEquals($expected, $result);
-    }
-
-    public function testLimitShouldThrowExceptionIfLimitIsLessThanOne()
-    {
-        $statement = 'SELECT * FROM example';
-
-        $this->expectException(\Exception::class);
-
-        $this->component->limit($statement, 0, 20);
-    }
-
-    public function testLimitShouldThrowExceptionIfOffsetIsLessThanOne()
-    {
-        $statement = 'SELECT * FROM example';
-
-        $this->expectException(\Exception::class);
-
-        $this->component->limit($statement, 5, -1);
     }
 
     public function testEnableTransactions()

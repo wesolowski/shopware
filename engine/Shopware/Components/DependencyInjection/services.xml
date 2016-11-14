@@ -234,7 +234,7 @@
         </service>
 
         <service id="CategoryDenormalization" class="Shopware\Components\Model\CategoryDenormalization">
-            <argument type="service" id="db_connection" />
+            <argument type="service" id="dbal_connection" />
         </service>
 
         <service id="shopware.holiday_table_updater" class="Shopware\Components\HolidayTableUpdater">

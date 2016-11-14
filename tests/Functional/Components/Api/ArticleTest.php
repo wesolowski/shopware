@@ -2910,7 +2910,7 @@ class ArticleTest extends TestCase
         );
 
         $this->assertCount(4, $normal);
-        $this->assertCount(8, $denormalized);
+        $this->assertCount(6, $denormalized);
 
         foreach ($rewriteCategories as $category) {
             $this->assertContains($category['id'], $normal);

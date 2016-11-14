@@ -105,26 +105,26 @@ class CategorySubscriber implements BaseEventSubscriber
     }
 
     /**
-     * @param Article  $article
+     * @param Article $article
      * @param Category $category
      */
     protected function addPendingAddAssignment(Article $article, Category $category)
     {
-        $this->pendingAddAssignments[$category->getId() . '_' . $article->getId()] = array(
+        $this->pendingAddAssignments[] = array(
             'category' => $category,
-            'article'  => $article
+            'article' => $article
         );
     }
 
     /**
-     * @param Article  $article
+     * @param Article $article
      * @param Category $category
      */
     protected function addPendingRemoveAssignment(Article $article, Category $category)
     {
-        $this->pendingRemoveAssignments[$category->getId() . '_' . $article->getId()] = array(
+        $this->pendingRemoveAssignments[] = array(
             'category' => $category,
-            'article'  => $article
+            'article' => $article
         );
     }
 
@@ -148,7 +148,7 @@ class CategorySubscriber implements BaseEventSubscriber
         return array(Events::onFlush, Events::postFlush);
     }
 
-     /**
+    /**
      * @param OnFlushEventArgs $eventArgs
      */
     public function onFlush(OnFlushEventArgs $eventArgs)
@@ -158,7 +158,7 @@ class CategorySubscriber implements BaseEventSubscriber
         }
 
         /** @var $em ModelManager */
-        $em  = $eventArgs->getEntityManager();
+        $em = $eventArgs->getEntityManager();
         $uow = $em->getUnitOfWork();
 
         $this->em = $em;
@@ -289,40 +289,48 @@ class CategorySubscriber implements BaseEventSubscriber
         }
     }
 
-    /**
-     * @param PostFlushEventArgs $eventArgs
-     */
-    public function postFlush(/** @noinspection PhpUnusedParameterInspection */ PostFlushEventArgs $eventArgs)
+    public function postFlush()
     {
         if ($this->disabledForNextFlush) {
             $this->disabledForNextFlush = false;
             return;
         }
 
-        // Remove assignments that noutralize each other
-        foreach ($this->pendingRemoveAssignments as $key => $pendingRemove) {
-            if (isset($this->pendingAddAssignments[$key])) {
-                unset($this->pendingAddAssignments[$key]);
-                unset($this->pendingRemoveAssignments[$key]);
-            }
-        }
 
+        $pendingRemoves = [];
         foreach ($this->pendingRemoveAssignments as $pendingRemove) {
             /** @var $category Category */
             $category = $pendingRemove['category'];
             /** @var $article Article */
-            $article  = $pendingRemove['article'];
-
-            $this->backlogRemoveAssignment($article->getId(), $category->getId());
+            $article = $pendingRemove['article'];
+            $pendingRemoves[$article->getId()][$category->getId()] = $category->getId();
         }
 
+        $pendingAdds = [];
         foreach ($this->pendingAddAssignments as $pendingAdd) {
             /** @var $category Category */
             $category = $pendingAdd['category'];
             /** @var $article Article */
-            $article  = $pendingAdd['article'];
+            $article = $pendingAdd['article'];
+            $pendingAdds[$article->getId()][$category->getId()] = $category->getId();
+        }
 
-            $this->backlogAddAssignment($article->getId(), $category->getId());
+        // Remove assignments that noutralize each other
+        foreach ($pendingRemoves as $articleId => $categoryIds) {
+            foreach ($categoryIds as $categoryId) {
+                if (isset($pendingAdds[$articleId][$categoryId])) {
+                    unset($pendingAdds[$articleId][$categoryId]);
+                    unset($pendingRemoves[$articleId][$categoryId]);
+                }
+            }
+        }
+
+        foreach ($pendingRemoves as $articleId => $categoryIds) {
+            $this->backlogRemoveAssignment($articleId, $categoryIds);
+        }
+
+        foreach ($pendingAdds as $articleId => $categoryIds) {
+            $this->backlogAddAssignment($articleId, $categoryIds);
         }
 
         foreach ($this->pendingMoves as $pendingMove) {
@@ -358,20 +366,20 @@ class CategorySubscriber implements BaseEventSubscriber
 
     /**
      * @param int $articleId
-     * @param int $categoryId
+     * @param int|int[] int $categosryId
      */
-    public function backlogRemoveAssignment($articleId, $categoryId)
+    public function backlogRemoveAssignment($articleId, $categosryId)
     {
-        $this->getCategoryComponent()->removeAssignment($articleId, $categoryId);
+        $this->getCategoryComponent()->removeAssignment($articleId, $categosryId);
     }
 
     /**
      * @param int $articleId
-     * @param int $categoryId
+     * @param int|int[] int $categosryId
      */
-    public function backlogAddAssignment($articleId, $categoryId)
+    public function backlogAddAssignment($articleId, $categosryId)
     {
-        $this->getCategoryComponent()->addAssignment($articleId, $categoryId);
+        $this->getCategoryComponent()->addAssignment($articleId, $categosryId);
     }
 
     /**
